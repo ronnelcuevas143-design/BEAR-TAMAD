@@ -603,9 +603,9 @@
   <div class="legend" id="legendEl" style="display:none">
     <div class="legend-item"><span class="badge badge-bullish">BULLISH FVG</span> Price at bullish HTF gap</div>
     <div class="legend-item"><span class="badge badge-bearish">BEARISH FVG</span> Price at bearish HTF gap</div>
-    <div class="legend-item"><span class="ltf-chip chip-green">GREEN</span> Bullish LTF candle at FVG</div>
-    <div class="legend-item"><span class="ltf-chip chip-red">RED</span> Bearish LTF candle at FVG</div>
-    <div class="legend-item"><span class="ltf-chip chip-greed">GREED</span> Strong momentum candle</div>
+    <div class="legend-item"><span class="ltf-chip chip-green">TF:G🟢R🔴G🟢</span> Green→Red→Green pattern touched FVG ✅</div>
+    <div class="legend-item"><span class="ltf-chip chip-greed">TF:GREED</span> Greed candle sa GRG sequence</div>
+    <div class="legend-item"><span class="ltf-chip chip-red">TF:RED</span> Walang GRG — last candle RED</div>
   </div>
 
   <!-- TABLE -->
@@ -644,9 +644,14 @@
 <div class="toast" id="toast"></div>
 
 <script>
-// ── BINANCE API ──────────────────────────────────────────────
+// ── BINANCE API (via CORS proxy) ─────────────────────────────
 const BASE = 'https://fapi.binance.com';
-const SPOT_BASE = 'https://api.binance.com';
+// CORS proxy — wraps any URL so browser can fetch it
+const PROXY = 'https://api.allorigins.win/raw?url=';
+
+function proxied(url) {
+  return PROXY + encodeURIComponent(url);
+}
 
 // Map UI timeframe strings → Binance interval codes
 const TF_MAP = {
@@ -667,7 +672,9 @@ setInterval(() => {
 
 // ── FETCH TOP SYMBOLS ────────────────────────────────────────
 async function getTopSymbols(n) {
-  const res = await fetch(`${BASE}/fapi/v1/ticker/24hr`);
+  const url = `${BASE}/fapi/v1/ticker/24hr`;
+  const res = await fetch(proxied(url));
+  if (!res.ok) throw new Error(`HTTP ${res.status} fetching tickers`);
   const data = await res.json();
   return data
     .filter(d => d.symbol.endsWith('USDT') && !d.symbol.includes('1000') && !d.symbol.includes('_'))
@@ -679,7 +686,8 @@ async function getTopSymbols(n) {
 // ── FETCH KLINES ─────────────────────────────────────────────
 async function getKlines(symbol, interval, limit = 50) {
   try {
-    const res = await fetch(`${BASE}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
+    const url = `${BASE}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+    const res = await fetch(proxied(url));
     if (!res.ok) return null;
     const data = await res.json();
     return data.map(k => ({
@@ -738,63 +746,64 @@ function priceInFVG(price, fvg, tolerancePct = 0.5) {
   return price >= (fvg.bottom - tol) && price <= (fvg.top + tol);
 }
 
-// ── GREED CANDLE DETECTION ───────────────────────────────────
-// Greed = large body candle (body > 60% of range), strong volume
+// ── CANDLE COLOR ─────────────────────────────────────────────
+function candleColor(c) {
+  if (c.close > c.open) return 'GREEN';
+  if (c.close < c.open) return 'RED';
+  return 'DOJI';
+}
+
+// ── GREED CANDLE ─────────────────────────────────────────────
+// Strong body (>60% of range) + above-average volume
 function isGreedCandle(c, candles) {
   const body = Math.abs(c.close - c.open);
   const range = c.high - c.low;
   if (range === 0) return false;
-  const bodyPct = body / range;
-
-  // Compare volume to average
   const avgVol = candles.slice(-10).reduce((s, x) => s + x.volume, 0) / 10;
-  const isHighVol = c.volume > avgVol * 1.3;
-
-  return bodyPct > 0.6 && isHighVol;
+  return (body / range) > 0.6 && c.volume > avgVol * 1.3;
 }
 
-// ── CANDLESTICK PATTERNS ─────────────────────────────────────
-function detectCandlePattern(candles) {
-  if (!candles || candles.length < 3) return [];
-  const patterns = [];
+// ── GREEN → RED → GREEN PATTERN (3-candle sequence) ──────────
+// Checks the last N candles for any occurrence of G→R→G
+// where at least one of those candles touched the FVG zone
+function detectGRG(candles, fvgTop, fvgBottom) {
+  if (!candles || candles.length < 3) return { found: false, greed: false, sequences: [] };
+  const sequences = [];
+
+  for (let i = 2; i < candles.length; i++) {
+    const c0 = candles[i - 2]; // GREEN
+    const c1 = candles[i - 1]; // RED
+    const c2 = candles[i];     // GREEN
+
+    if (candleColor(c0) === 'GREEN' &&
+        candleColor(c1) === 'RED'   &&
+        candleColor(c2) === 'GREEN') {
+
+      // At least one candle in the triplet must have touched the FVG zone
+      const anyTouchFVG = [c0, c1, c2].some(c =>
+        c.low <= fvgTop && c.high >= fvgBottom
+      );
+
+      if (anyTouchFVG) {
+        const greed = isGreedCandle(c2, candles) || isGreedCandle(c0, candles);
+        sequences.push({ idx: i, greed });
+      }
+    }
+  }
+
+  const found = sequences.length > 0;
+  const greed = sequences.some(s => s.greed);
+  return { found, greed, sequences };
+}
+
+// ── SIMPLE LAST-CANDLE COLOR (for display when no GRG) ───────
+function lastCandleInfo(candles) {
+  if (!candles || candles.length < 1) return { color: 'NONE', greed: false };
   const last = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
-  const prev2 = candles[candles.length - 3];
-
-  const lastBody = Math.abs(last.close - last.open);
-  const lastRange = last.high - last.low;
-  const lastUpperWick = last.high - Math.max(last.close, last.open);
-  const lastLowerWick = Math.min(last.close, last.open) - last.low;
-
-  // COLOR CODING
-  if (last.close > last.open) patterns.push('GREEN');
-  else patterns.push('RED');
-
-  // GREED candle
-  if (isGreedCandle(last, candles)) patterns.push('GREED');
-
-  // Hammer (bullish reversal)
-  if (lastLowerWick > lastBody * 2 && lastUpperWick < lastBody * 0.5 && lastRange > 0)
-    patterns.push('HAMMER');
-
-  // Shooting Star (bearish)
-  if (lastUpperWick > lastBody * 2 && lastLowerWick < lastBody * 0.5 && lastRange > 0)
-    patterns.push('STAR');
-
-  // Engulfing
-  if (last.close > last.open && prev.close < prev.open &&
-      last.open < prev.close && last.close > prev.open)
-    patterns.push('BULL-ENG');
-
-  if (last.close < last.open && prev.close > prev.open &&
-      last.open > prev.close && last.close < prev.open)
-    patterns.push('BEAR-ENG');
-
-  // Doji
-  if (lastBody < lastRange * 0.1 && lastRange > 0)
-    patterns.push('DOJI');
-
-  return patterns;
+  return {
+    color: candleColor(last),
+    greed: isGreedCandle(last, candles)
+  };
 }
 
 // ── ANALYZE ONE COIN ─────────────────────────────────────────
@@ -817,7 +826,6 @@ async function analyzeCoin(symbol, price, change, htfTFs, ltfTFs) {
     if (!candles) continue;
 
     const fvgs = detectFVGs(candles);
-    // Only keep recent FVGs (last 20 candles) that price is currently near
     const recent = fvgs.filter(f => f.idx >= candles.length - 20);
 
     for (const fvg of recent) {
@@ -828,46 +836,51 @@ async function analyzeCoin(symbol, price, change, htfTFs, ltfTFs) {
     }
   }
 
-  if (!result.atFVG) return null; // No HTF FVG hit
+  if (!result.atFVG) return null;
 
   // Determine dominant direction
   const bullCount = result.htfFVGs.filter(f => f.type === 'BULLISH').length;
   const bearCount = result.htfFVGs.filter(f => f.type === 'BEARISH').length;
   result.htfType = bullCount >= bearCount ? 'BULLISH' : 'BEARISH';
 
-  // FVG zone from strongest FVG
   const best = result.htfFVGs.sort((a, b) => b.strength - a.strength)[0];
   result.fvgZone = { top: best.top, bottom: best.bottom, tf: best.tf };
   result.score += result.htfFVGs.length * 10;
 
-  // === 2. Check LTF for patterns at FVG ===
+  // === 2. LTF: Look for Green→Red→Green touching HTF FVG ===
   for (const tf of ltfTFs) {
     const interval = TF_MAP[tf];
     if (!interval) continue;
-    const candles = await getKlines(symbol, interval, 30);
+    const candles = await getKlines(symbol, interval, 40);
     if (!candles) continue;
 
-    // Check if last few LTF candles touched FVG zone
-    const lastCandles = candles.slice(-5);
-    const touchedFVG = lastCandles.some(c =>
-      c.low <= result.fvgZone.top && c.high >= result.fvgZone.bottom
-    );
+    const grg = detectGRG(candles, result.fvgZone.top, result.fvgZone.bottom);
+    const last = lastCandleInfo(candles);
 
-    const patterns = detectCandlePattern(candles);
+    result.ltfSignals.push({
+      tf,
+      grgFound: grg.found,
+      greed: grg.greed,
+      lastColor: last.color,
+      lastGreed: last.greed
+    });
 
-    if (touchedFVG) {
-      result.ltfSignals.push({ tf, patterns, touched: true });
-      result.score += 15;
-      if (patterns.includes('GREED')) result.score += 20;
-      if (patterns.includes('BULL-ENG') || patterns.includes('HAMMER')) result.score += 15;
-      if (patterns.includes('BEAR-ENG') || patterns.includes('STAR')) result.score += 15;
-    } else {
-      result.ltfSignals.push({ tf, patterns, touched: false });
-      result.score += 5;
+    if (grg.found) {
+      result.score += 25; // GRG pattern at FVG = strong signal
+      if (grg.greed) result.score += 15; // Greed candle bonus
     }
   }
 
+  // Bonus: all 3 LTFs confirmed GRG
+  const allConfirmed = result.ltfSignals.every(s => s.grgFound);
+  if (allConfirmed && result.ltfSignals.length === 3) result.score += 20;
+
   result.score = Math.min(100, result.score);
+
+  // ✅ VALID SIGNAL ONLY: HTF FVG + at least one LTF GRG touching the zone
+  const hasValidLTF = result.ltfSignals.some(s => s.grgFound);
+  if (!hasValidLTF) return null;
+
   return result;
 }
 
@@ -912,7 +925,7 @@ async function startScan() {
         fvgFound++;
         if (res.htfType === 'BULLISH') bullCount++;
         else bearCount++;
-        const hasLTF = res.ltfSignals.some(s => s.touched);
+        const hasLTF = res.ltfSignals.some(s => s.grgFound);
         if (hasLTF) ltfConf++;
 
         allResults.push(res);
@@ -957,10 +970,8 @@ function renderFiltered() {
   let data = [...allResults];
   if (currentFilter === 'BULLISH') data = data.filter(r => r.htfType === 'BULLISH');
   else if (currentFilter === 'BEARISH') data = data.filter(r => r.htfType === 'BEARISH');
-  else if (currentFilter === 'LTF_CONFIRMED') data = data.filter(r => r.ltfSignals.some(s => s.touched));
-  else if (currentFilter === 'GREED') data = data.filter(r =>
-    r.ltfSignals.some(s => s.patterns.includes('GREED'))
-  );
+  else if (currentFilter === 'LTF_CONFIRMED') data = data.filter(r => r.ltfSignals.some(s => s.grgFound));
+  else if (currentFilter === 'GREED') data = data.filter(r => r.ltfSignals.some(s => s.greed));
   updateTable(data);
 }
 
@@ -1000,18 +1011,16 @@ function updateTable(results) {
       atFVGStr = `<span style="color:var(--gold)">${pct}% thru</span>`;
     }
 
-    // LTF signals
-    const ltfHTML = r.ltfSignals.map(s => {
-      const touched = s.touched;
-      const chips = s.patterns.map(p => {
-        let cls = 'chip-none';
-        if (p === 'GREEN' || p === 'BULL-ENG' || p === 'HAMMER') cls = 'chip-green';
-        else if (p === 'RED' || p === 'BEAR-ENG' || p === 'STAR') cls = 'chip-red';
-        else if (p === 'GREED') cls = 'chip-greed';
-        return `<span class="ltf-chip ${cls}">${s.tf}:${p}</span>`;
-      }).join('');
-      return touched ? chips : `<span class="ltf-chip chip-none">${s.tf}:NO-TOUCH</span>`;
-    }).join('');
+    // LTF signals — only show timeframes where GRG touched FVG
+    const grgHits = r.ltfSignals.filter(s => s.grgFound);
+    const ltfHTML = grgHits.length > 0
+      ? grgHits.map(s => {
+          const greedChip = s.greed
+            ? ` <span class="ltf-chip chip-greed">${s.tf}:GREED</span>`
+            : '';
+          return `<span class="ltf-chip chip-green">${s.tf} ✅ G→R→G</span>${greedChip}`;
+        }).join('')
+      : '<span class="ltf-chip chip-none">—</span>';
 
     // Score bar
     const scoreColor = r.score >= 70 ? 'var(--green)' : r.score >= 40 ? 'var(--gold)' : 'var(--muted)';
