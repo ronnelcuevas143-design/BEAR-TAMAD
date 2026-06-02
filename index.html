@@ -529,10 +529,11 @@
     <div class="control-group">
       <div class="control-label">HTF Timeframe</div>
       <select id="htfSelect">
-        <option value="1D,4H">1D + 4H (Recommended)</option>
+        <option value="1W,1D,4H">1W + 1D + 4H (Recommended)</option>
+        <option value="1D,4H">1D + 4H</option>
+        <option value="1W,1D">1W + 1D</option>
         <option value="1D">1D only</option>
         <option value="4H">4H only</option>
-        <option value="1W,1D">1W + 1D</option>
       </select>
     </div>
     <div class="control-group">
@@ -596,7 +597,6 @@
     <button class="tab" onclick="filterResults('BULLISH', this)">🟢 BULLISH FVG</button>
     <button class="tab" onclick="filterResults('BEARISH', this)">🔴 BEARISH FVG</button>
     <button class="tab" onclick="filterResults('LTF_CONFIRMED', this)">⚡ LTF CONFIRMED</button>
-    <button class="tab" onclick="filterResults('GREED', this)">🟡 GREED CANDLE</button>
   </div>
 
   <!-- LEGEND -->
@@ -781,34 +781,38 @@ function isGreedCandle(c, candles) {
 // ── GREEN → RED → GREEN PATTERN (3-candle sequence) ──────────
 // Checks the last N candles for any occurrence of G→R→G
 // where at least one of those candles touched the FVG zone
+// ── GREEN → RED → GREEN (wick-touches-FVG validation) ────────
+// Bearish scenario: G→R→G sequence where the WICK of each of the
+// 3 candles must touch/overlap the HTF FVG zone.
+// This confirms price entered the FVG zone and was rejected.
 function detectGRG(candles, fvgTop, fvgBottom) {
-  if (!candles || candles.length < 3) return { found: false, greed: false, sequences: [] };
+  if (!candles || candles.length < 3) return { found: false, sequences: [] };
   const sequences = [];
 
-  for (let i = 2; i < candles.length; i++) {
-    const c0 = candles[i - 2]; // GREEN
-    const c1 = candles[i - 1]; // RED
-    const c2 = candles[i];     // GREEN
+  // Check last 15 candles only — only recent reaction matters
+  const start = Math.max(2, candles.length - 15);
 
-    if (candleColor(c0) === 'GREEN' &&
-        candleColor(c1) === 'RED'   &&
-        candleColor(c2) === 'GREEN') {
+  for (let i = start; i < candles.length; i++) {
+    const c0 = candles[i - 2]; // Candle 1: GREEN
+    const c1 = candles[i - 1]; // Candle 2: RED
+    const c2 = candles[i];     // Candle 3: GREEN
 
-      // At least one candle in the triplet must have touched the FVG zone
-      const anyTouchFVG = [c0, c1, c2].some(c =>
-        c.low <= fvgTop && c.high >= fvgBottom
-      );
+    // Step 1: Color sequence must be GREEN → RED → GREEN
+    if (candleColor(c0) !== 'GREEN') continue;
+    if (candleColor(c1) !== 'RED')   continue;
+    if (candleColor(c2) !== 'GREEN') continue;
 
-      if (anyTouchFVG) {
-        const greed = isGreedCandle(c2, candles) || isGreedCandle(c0, candles);
-        sequences.push({ idx: i, greed });
-      }
+    // Step 2: At least ONE of the 3 candles' wick must touch the FVG zone
+    const c0WickTouches = c0.high >= fvgBottom && c0.low <= fvgTop;
+    const c1WickTouches = c1.high >= fvgBottom && c1.low <= fvgTop;
+    const c2WickTouches = c2.high >= fvgBottom && c2.low <= fvgTop;
+
+    if (c0WickTouches || c1WickTouches || c2WickTouches) {
+      sequences.push({ idx: i });
     }
   }
 
-  const found = sequences.length > 0;
-  const greed = sequences.some(s => s.greed);
-  return { found, greed, sequences };
+  return { found: sequences.length > 0, sequences };
 }
 
 // ── SIMPLE LAST-CANDLE COLOR (for display when no GRG) ───────
@@ -870,19 +874,14 @@ async function analyzeCoin(symbol, price, change, htfTFs, ltfTFs) {
     if (!candles) continue;
 
     const grg = detectGRG(candles, result.fvgZone.top, result.fvgZone.bottom);
-    const last = lastCandleInfo(candles);
 
     result.ltfSignals.push({
       tf,
       grgFound: grg.found,
-      greed: grg.greed,
-      lastColor: last.color,
-      lastGreed: last.greed
     });
 
     if (grg.found) {
-      result.score += 25; // GRG pattern at FVG = strong signal
-      if (grg.greed) result.score += 15; // Greed candle bonus
+      result.score += 30;
     }
   }
 
@@ -986,7 +985,6 @@ function renderFiltered() {
   if (currentFilter === 'BULLISH') data = data.filter(r => r.htfType === 'BULLISH');
   else if (currentFilter === 'BEARISH') data = data.filter(r => r.htfType === 'BEARISH');
   else if (currentFilter === 'LTF_CONFIRMED') data = data.filter(r => r.ltfSignals.some(s => s.grgFound));
-  else if (currentFilter === 'GREED') data = data.filter(r => r.ltfSignals.some(s => s.greed));
   updateTable(data);
 }
 
