@@ -603,9 +603,7 @@
   <div class="legend" id="legendEl" style="display:none">
     <div class="legend-item"><span class="badge badge-bullish">BULLISH FVG</span> Price at bullish HTF gap</div>
     <div class="legend-item"><span class="badge badge-bearish">BEARISH FVG</span> Price at bearish HTF gap</div>
-    <div class="legend-item"><span class="ltf-chip chip-green">TF:G🟢R🔴G🟢</span> Green→Red→Green pattern touched FVG ✅</div>
-    <div class="legend-item"><span class="ltf-chip chip-greed">TF:GREED</span> Greed candle sa GRG sequence</div>
-    <div class="legend-item"><span class="ltf-chip chip-red">TF:RED</span> Walang GRG — last candle RED</div>
+    <div class="legend-item"><span class="ltf-chip chip-green">TF ✅ G→R→G</span> GRG pattern nag-touch sa FVG zone — Valid Signal</div>
   </div>
 
   <!-- TABLE -->
@@ -646,12 +644,29 @@
 <script>
 // ── BINANCE API (via CORS proxy) ─────────────────────────────
 const BASE = 'https://fapi.binance.com';
-// CORS proxy — wraps any URL so browser can fetch it
-const PROXY = 'https://api.allorigins.win/raw?url=';
+const PROXIES = [
+  'https://corsproxy.io/?',
+  'https://api.allorigins.win/raw?url=',
+  'https://proxy.cors.sh/',
+];
+let activeProxy = 0;
 
-function proxied(url) {
-  return PROXY + encodeURIComponent(url);
+async function fetchWithProxy(url) {
+  for (let i = 0; i < PROXIES.length; i++) {
+    const proxy = PROXIES[(activeProxy + i) % PROXIES.length];
+    try {
+      const fullUrl = proxy + encodeURIComponent(url);
+      const res = await fetch(fullUrl, { signal: AbortSignal.timeout(8000) });
+      if (res.ok) {
+        activeProxy = (activeProxy + i) % PROXIES.length;
+        return res;
+      }
+    } catch { continue; }
+  }
+  throw new Error('All proxies failed — check internet connection');
 }
+
+function proxied(url) { return url; } // kept for compat, unused now
 
 // Map UI timeframe strings → Binance interval codes
 const TF_MAP = {
@@ -673,7 +688,7 @@ setInterval(() => {
 // ── FETCH TOP SYMBOLS ────────────────────────────────────────
 async function getTopSymbols(n) {
   const url = `${BASE}/fapi/v1/ticker/24hr`;
-  const res = await fetch(proxied(url));
+  const res = await fetchWithProxy(url);
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching tickers`);
   const data = await res.json();
   return data
@@ -687,7 +702,7 @@ async function getTopSymbols(n) {
 async function getKlines(symbol, interval, limit = 50) {
   try {
     const url = `${BASE}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-    const res = await fetch(proxied(url));
+    const res = await fetchWithProxy(url);
     if (!res.ok) return null;
     const data = await res.json();
     return data.map(k => ({
@@ -1014,12 +1029,7 @@ function updateTable(results) {
     // LTF signals — only show timeframes where GRG touched FVG
     const grgHits = r.ltfSignals.filter(s => s.grgFound);
     const ltfHTML = grgHits.length > 0
-      ? grgHits.map(s => {
-          const greedChip = s.greed
-            ? ` <span class="ltf-chip chip-greed">${s.tf}:GREED</span>`
-            : '';
-          return `<span class="ltf-chip chip-green">${s.tf} ✅ G→R→G</span>${greedChip}`;
-        }).join('')
+      ? grgHits.map(s => `<span class="ltf-chip chip-green">${s.tf} ✅ G→R→G</span>`).join('')
       : '<span class="ltf-chip chip-none">—</span>';
 
     // Score bar
